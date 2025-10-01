@@ -1,0 +1,387 @@
+
+<!DOCTYPE html>
+<html lang="zh-cn">
+<head>
+    <meta charset="UTF-8">
+    <title>球球大作战简易版</title>
+    <style>
+        body { background: #222; margin: 0; overflow: hidden; }
+        #score { color: #fff; font-size: 20px; position: fixed; left: 20px; top: 10px; z-index: 10; }
+        h1 { color: #fff; text-align: center; }
+        canvas { background: #fff; display: block; margin: 0 auto; box-shadow: 0 0 10px #333; }
+    </style>
+</head>
+<body>
+    <h1>球球大作战简易版</h1>
+    <div id="score">体重：0 | 最高纪录：0</div>
+    <canvas id="game"></canvas>
+    <script>
+// --- 配置 ---
+const PLAYER_COLOR = '#2196F3';
+const BOT_COLORS = ['#4CAF50', '#E91E63', '#FF9800', '#9C27B0', '#009688'];
+const BOT_NAMES = ['人机A', '人机B', '人机C', '人机D', '人机E'];
+const INIT_PLAYER_RADIUS = 20;
+const INIT_BOT_RADIUS = 18;
+const AI_BALL_MIN = 8, AI_BALL_MAX = 40;
+const MAP_SCALE = 2; // 地图为屏幕2倍
+const BOT_START_DELAY = 3000;
+
+// --- 画布和地图 ---
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let viewW = window.innerWidth, viewH = window.innerHeight;
+let mapW = viewW * MAP_SCALE, mapH = viewH * MAP_SCALE;
+function resizeCanvas() {
+    viewW = window.innerWidth;
+    viewH = window.innerHeight;
+    mapW = viewW * MAP_SCALE;
+    mapH = viewH * MAP_SCALE;
+    canvas.width = viewW;
+    canvas.height = viewH;
+}
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+
+// --- 工具函数 ---
+function getNonOverlapPos(existing, r) {
+    let tryCount = 0;
+    while (true) {
+        let x = Math.random() * (mapW - 2*r) + r;
+        let y = Math.random() * (mapH - 2*r) + r;
+        let ok = true;
+        for (let b of existing) {
+            let dx = b.x - x, dy = b.y - y;
+            if (Math.sqrt(dx*dx + dy*dy) < b.r + r + 10) { ok = false; break; }
+        }
+        if (ok || tryCount++ > 100) return {x, y};
+    }
+}
+
+// --- 游戏状态 ---
+let playerBalls = [];
+let aiBalls = [];
+let botCounter = 2;
+let lastDir = {x: 1, y: 0};
+let gameOver = false;
+let botStartTime = Date.now();
+let reviveTimeout = null;
+
+// --- 初始化玩家和人机 ---
+function initBalls() {
+    playerBalls = [];
+    let playerPos = getNonOverlapPos([], INIT_PLAYER_RADIUS);
+    playerBalls.push({
+        x: playerPos.x, y: playerPos.y, r: INIT_PLAYER_RADIUS, color: PLAYER_COLOR, score: INIT_PLAYER_RADIUS, vx: 0, vy: 0, isBot: false, name: '玩家'
+    });
+    for (let i = 0; i < 2; i++) {
+        let botPos = getNonOverlapPos(playerBalls, INIT_BOT_RADIUS);
+        playerBalls.push({
+            x: botPos.x, y: botPos.y, r: INIT_BOT_RADIUS, color: BOT_COLORS[i], score: 0, vx: 0, vy: 0, isBot: true, name: BOT_NAMES[i]
+        });
+    }
+    botCounter = 2;
+    botStartTime = Date.now();
+}
+initBalls();
+
+// --- AI球 ---
+function spawnAIBall() {
+    let r = Math.random() * (AI_BALL_MAX - AI_BALL_MIN) + AI_BALL_MIN;
+    let x = Math.random() * (mapW - 2*r) + r;
+    let y = Math.random() * (mapH - 2*r) + r;
+    let color = `hsl(${Math.random()*360},70%,60%)`;
+    let speed = Math.random() * 1.5 + 0.5;
+    let angle = Math.random() * Math.PI * 2;
+    aiBalls.push({x, y, r, color, speed, angle});
+}
+for (let i = 0; i < 15; i++) spawnAIBall();
+setInterval(() => { if (!gameOver) spawnAIBall(); }, 1600);
+
+// --- 键盘控制 ---
+document.addEventListener('keydown', function(e) {
+    let vx = 0, vy = 0;
+    if (e.key === 'ArrowUp') { vx = 0; vy = -1; lastDir = {x: 0, y: -1}; }
+    else if (e.key === 'ArrowDown') { vx = 0; vy = 1; lastDir = {x: 0, y: 1}; }
+    else if (e.key === 'ArrowLeft') { vx = -1; vy = 0; lastDir = {x: -1, y: 0}; }
+    else if (e.key === 'ArrowRight') { vx = 1; vy = 0; lastDir = {x: 1, y: 0}; }
+    else return;
+    for (let ball of playerBalls) if (!ball.isBot) { ball.vx = vx; ball.vy = vy; }
+});
+
+// --- 鼠标分身/吐球 ---
+canvas.addEventListener('mousedown', function(e) {
+    if (gameOver) return;
+    let mainBall = playerBalls.filter(b=>!b.isBot).reduce((a, b) => a.r > b.r ? a : b);
+    if (e.button === 0) { // 分身
+        let oldBalls = playerBalls.filter(b=>!b.isBot);
+        if (mainBall.r > 24) {
+            let totalBalls = oldBalls.length * 2;
+            let totalArea = oldBalls.reduce((sum, b) => sum + Math.PI * b.r * b.r, 0);
+            let totalScore = oldBalls.reduce((sum, b) => sum + b.score, 0);
+            let newR = Math.sqrt(totalArea / (Math.PI * totalBalls));
+            let centerX = mainBall.x, centerY = mainBall.y;
+            playerBalls = playerBalls.filter(b=>b.isBot);
+            for (let i = 0; i < totalBalls; i++) {
+                let angle = (2 * Math.PI / totalBalls) * i;
+                playerBalls.push({
+                    x: centerX + Math.cos(angle) * (newR * 3),
+                    y: centerY + Math.sin(angle) * (newR * 3),
+                    r: newR,
+                    color: mainBall.color,
+                    score: totalScore / totalBalls, // 均分得分
+                    vx: mainBall.vx,
+                    vy: mainBall.vy,
+                    isBot: false,
+                    name: playerBalls.find(b=>!b.isBot)?.name || '玩家'
+                });
+            }
+        }
+    } else if (e.button === 1) { // 鼠标中键，体积变大一倍
+        if (mainBall) {
+            mainBall.r *= 2;
+            mainBall.score = mainBall.r;
+        }
+    } else if (e.button === 2) { // 吐球
+        if (mainBall.r > 16) {
+            let dir = (lastDir.x !== 0 || lastDir.y !== 0) ? lastDir : {x: 1, y: 0};
+            let angle = Math.atan2(dir.y, dir.x);
+            let expR = Math.max(6, mainBall.r * 0.18);
+            mainBall.r -= expR;
+            let expBall = {
+                x: mainBall.x + Math.cos(angle) * (mainBall.r + expR),
+                y: mainBall.y + Math.sin(angle) * (mainBall.r + expR),
+                r: expR,
+                color: mainBall.color,
+                vx: Math.cos(angle) * 2.5,
+                vy: Math.sin(angle) * 2.5,
+                isExp: true,
+                fromPlayer: true
+            };
+            aiBalls.push(expBall);
+        }
+    }
+});
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// --- 移动 ---
+function movePlayerBalls() {
+    let now = Date.now();
+    for (let ball of playerBalls) {
+        if (ball.isBot) {
+            // 人机优先吃玩家分身
+            let target = null, minDist = 1e9;
+            // 先找玩家分身
+            for (let p of playerBalls) {
+                if (!p.isBot && p.r < ball.r) {
+                    let dx = p.x - ball.x, dy = p.y - ball.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy);
+                    if (dist < minDist) { minDist = dist; target = p; }
+                }
+            }
+            // 如果没有玩家分身可吃，再找AI球
+            if (!target) {
+                for (let ai of aiBalls) {
+                    if (ai.r < ball.r) {
+                        let dx = ai.x - ball.x, dy = ai.y - ball.y;
+                        let dist = Math.sqrt(dx*dx + dy*dy);
+                        if (dist < minDist) { minDist = dist; target = ai; }
+                    }
+                }
+            }
+            if (target) {
+                let dx = target.x - ball.x, dy = target.y - ball.y;
+                let len = Math.sqrt(dx*dx + dy*dy) || 1;
+                ball.vx = dx / len;
+                ball.vy = dy / len;
+            } else { ball.vx = 0; ball.vy = 0; }
+        }
+        let speed;
+        if (!ball.isBot) {
+            // 玩家速度进一步加快，但限制最大速度，防止穿透
+            speed = Math.max(5, 18 - ball.r/6);
+            speed = Math.min(speed, 20); // 限制最大速度
+        } else {
+            speed = Math.max(1.5, 6 - ball.r/16);
+        }
+        // 分多步小步长移动，提升高速度下的碰撞检测
+        let steps = Math.ceil(speed / 4);
+        let stepVx = ball.vx * (speed / steps);
+        let stepVy = ball.vy * (speed / steps);
+        for (let s = 0; s < steps; s++) {
+            ball.x += stepVx;
+            ball.y += stepVy;
+            if (ball.x - ball.r < 0) ball.x = ball.r;
+            if (ball.x + ball.r > mapW) ball.x = mapW - ball.r;
+            if (ball.y - ball.r < 0) ball.y = ball.r;
+            if (ball.y + ball.r > mapH) ball.y = mapH - ball.r;
+        }
+    }
+}
+function moveAIBalls() {
+    for (let ball of aiBalls) {
+        if (ball.isExp) {
+            ball.x += ball.vx; ball.y += ball.vy;
+            if (ball.x - ball.r < 0 || ball.x + ball.r > mapW) ball.vx = -ball.vx;
+            if (ball.y - ball.r < 0 || ball.y + ball.r > mapH) ball.vy = -ball.vy;
+        } else {
+            ball.x += Math.cos(ball.angle) * ball.speed;
+            ball.y += Math.sin(ball.angle) * ball.speed;
+            if (ball.x - ball.r < 0 || ball.x + ball.r > mapW) ball.angle = Math.PI - ball.angle;
+            if (ball.y - ball.r < 0 || ball.y + ball.r > mapH) ball.angle = -ball.angle;
+        }
+    }
+}
+
+// --- 摄像机 ---
+function drawBalls() {
+    let player = playerBalls.find(b => !b.isBot);
+    let camX = player ? player.x - viewW/2 : 0;
+    let camY = player ? player.y - viewH/2 : 0;
+    camX = Math.max(0, Math.min(camX, mapW - viewW));
+    camY = Math.max(0, Math.min(camY, mapH - viewH));
+    // 画AI球
+    for (let ball of aiBalls) {
+        ctx.beginPath();
+        ctx.arc(ball.x - camX, ball.y - camY, ball.r, 0, Math.PI*2);
+        ctx.fillStyle = ball.color;
+        ctx.fill();
+    }
+    // 画玩家球
+    for (let ball of playerBalls) {
+        ctx.beginPath();
+        ctx.arc(ball.x - camX, ball.y - camY, ball.r, 0, Math.PI*2);
+        ctx.fillStyle = ball.color;
+        ctx.fill();
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        if (ball.name && !ball.isBot) {
+            ctx.font = 'bold 16px Arial';
+            ctx.fillStyle = '#222';
+            ctx.textAlign = 'center';
+            ctx.fillText('玩家', ball.x - camX, ball.y - camY - ball.r - 8);
+        } else if (ball.name) {
+            ctx.font = 'bold 16px Arial';
+            ctx.fillStyle = '#222';
+            ctx.textAlign = 'center';
+            ctx.fillText(ball.name, ball.x - camX, ball.y - camY - ball.r - 8);
+        }
+    }
+}
+
+// --- 吃球、胜利、复活 ---
+function checkEat() {
+    // 玩家球与AI球/经验球，限制每帧检测数量缓解卡顿
+    const maxPlayerAIChecks = 40;
+    let playerAIChecks = 0;
+    for (let j = playerBalls.length-1; j >= 0; j--) {
+        let pBall = playerBalls[j];
+        for (let i = aiBalls.length-1; i >= 0; i--) {
+            if (playerAIChecks++ > maxPlayerAIChecks) break;
+            let ball = aiBalls[i];
+            let dx = pBall.x - ball.x, dy = pBall.y - ball.y;
+            let dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < pBall.r + ball.r) {
+                if (ball.isExp) {
+                    pBall.r += ball.r * 0.5;
+                    pBall.score = pBall.r;
+                    aiBalls.splice(i,1);
+                } else if (pBall.r > ball.r) {
+                    pBall.r += ball.r * 0.25;
+                    pBall.score = pBall.r;
+                    aiBalls.splice(i,1);
+                } else {
+                    if (playerBalls.filter(b=>!b.isBot).length > 1) {
+                        playerBalls.splice(j, 1);
+                        break;
+                    } else {
+                        gameOver = true;
+                        document.getElementById('score').innerText = '游戏结束！3秒后自动复活';
+                        if (reviveTimeout) clearTimeout(reviveTimeout);
+                        reviveTimeout = setTimeout(() => {
+                            aiBalls = [];
+                            for (let i = 0; i < 15; i++) spawnAIBall();
+                            initBalls();
+                            gameOver = false;
+                            document.getElementById('score').innerText = '体重：0 | 最高纪录：' + (localStorage.getItem('maxWeight')||0);
+                            gameLoop();
+                        }, 3000);
+                    }
+                }
+            }
+        }
+        if (playerAIChecks > maxPlayerAIChecks) break;
+    }
+    // 玩家球之间互吃
+    for (let i = playerBalls.length-1; i >= 0; i--) {
+        for (let j = playerBalls.length-1; j >= 0; j--) {
+            if (i !== j && playerBalls[i] && playerBalls[j]) {
+                let a = playerBalls[i], b = playerBalls[j];
+                let dx = a.x - b.x, dy = a.y - b.y;
+                let dist = Math.sqrt(dx*dx + dy*dy);
+                if (dist < a.r + b.r && a.r > b.r * 1.05) {
+                    a.r += b.r * 0.25;
+                    a.score = a.r;
+                    // 人机被吃掉后不再复活
+                    playerBalls.splice(j,1);
+                    if (j < i) i--;
+                }
+            }
+        }
+    }
+    // AI球吃所有比自己小的球（经验球和其他AI球），每帧只检测部分，缓解卡顿
+    const maxAIChecks = 40; // 每帧最多检测40次AI球碰撞，进一步缓解卡顿
+    let aiChecks = 0;
+    for (let k = aiBalls.length-1; k >= 0; k--) {
+        let ai = aiBalls[k];
+        if (!ai.isExp) {
+            for (let m = aiBalls.length-1; m >= 0; m--) {
+                if (aiChecks++ > maxAIChecks) break;
+                let other = aiBalls[m];
+                if (k !== m && other.r < ai.r) {
+                    let dx = ai.x - other.x, dy = ai.y - other.y;
+                    let dist = Math.sqrt(dx*dx + dy*dy);
+                    if (dist < ai.r + other.r) {
+                        ai.r += other.r * (other.isExp ? 0.5 : 0.25);
+                        aiBalls.splice(m,1);
+                        if (m < k) k--;
+                    }
+                }
+            }
+        }
+        if (aiChecks > maxAIChecks) break;
+    }
+}
+
+// --- 主循环 ---
+function draw() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    drawBalls();
+}
+function update() {
+    if (gameOver) return;
+    movePlayerBalls();
+    moveAIBalls();
+    checkEat();
+    // 最高体重纪录
+    let maxWeight = Number(localStorage.getItem('maxWeight') || 0);
+    let playerWeights = playerBalls.filter(b=>!b.isBot).map(b=>b.r);
+    let curWeight = playerWeights.length ? Math.max(...playerWeights) : 0;
+    let curWeightInt = Math.round(curWeight);
+    let maxWeightInt = Math.round(maxWeight);
+    if (curWeight > maxWeight) {
+        maxWeight = curWeight;
+        maxWeightInt = Math.round(maxWeight);
+        localStorage.setItem('maxWeight', maxWeight);
+    }
+    document.getElementById('score').innerText = '体重：' + curWeightInt + ' | 最高纪录：' + maxWeightInt;
+}
+function gameLoop() {
+    update();
+    draw();
+    if (!gameOver) requestAnimationFrame(gameLoop);
+}
+gameLoop();
+    </script>
+</body>
+</html>
